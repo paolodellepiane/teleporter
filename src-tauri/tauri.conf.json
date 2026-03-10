@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "teleporter2",
+  "version": "0.1.1",
+  "identifier": "com.paolo.teleporter2",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "teleporter2",
+        "width": 800,
+        "height": 600
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "app",
+    "createUpdaterArtifacts": true,
+    "resources": [],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIyOTlCOTY5M0E4MUZGRDkKUldUWi80RTZhYm1ac2hPS25OZko3ZFd1OHNFdS81bDc1L2oweUFSeC9IQzBZMFZ0a2V5SnRoUnYK",
+      "endpoints": [
+        "http://127.0.0.1:8080/server.json"
+      ],
+      "dangerousInsecureTransportProtocol": true
+    }
+  }
+}
