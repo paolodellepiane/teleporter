@@ -14,8 +14,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest' # for Arm based macs (M1 and above).
-            args: '--target aarch64-apple-darwin'
           - platform: 'windows-latest'
             args: ''
 
@@ -27,7 +25,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: lts/*
-          cache: 'pnpm' # Set this to npm, yarn or pnpm.
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable # Set this to dtolnay/rust-toolchain@nightly
@@ -42,7 +39,7 @@ jobs:
 
       - name: install frontend dependencies
         # If you don't have `beforeBuildCommand` configured you may want to build your frontend here too.
-        run: pnpm install # change this to npm or pnpm depending on which one you use.
+        run: bun install
 
       - uses: tauri-apps/tauri-action@v0
         env:
