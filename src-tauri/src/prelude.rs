@@ -1,5 +1,5 @@
 #![allow(dead_code, unused_imports)]
-pub use anyhow::{anyhow, bail, Context, Result};
+pub use anyhow::{anyhow, bail, Result};
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use regex::Regex;
 use std::collections::HashSet;
@@ -205,114 +205,10 @@ impl<T> ErrorExt<T> for Option<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct NaiveLogger {
-    pub target: File,
-    pub log_dir: PathBuf,
-    pub file_name: String,
-}
-
-static LOGGER_INSTANCE: OnceLock<Mutex<NaiveLogger>> = OnceLock::new();
-
-impl NaiveLogger {
-    pub fn initialized() -> bool {
-        LOGGER_INSTANCE.get().is_some()
-    }
-
-    pub fn instance() -> &'static Mutex<NaiveLogger> {
-        LOGGER_INSTANCE.get().expect("logger is not initialized")
-    }
-
-    fn retention(dir: impl AsRef<Path>) -> Result<()> {
-        let now = Utc::now();
-        for e in fs::read_dir(dir)?
-            .filter_map(Result::ok)
-            .filter(|x: &DirEntry| {
-                x.file_name()
-                    .to_str()
-                    .unwrap_or_default()
-                    .ends_with(".tar.gz")
-            })
-        {
-            let file_name = e.file_name();
-            let file_name = file_name.to_str().unwrap_or_default();
-            let log_date = &file_name[0..file_name.len() - ".tar.gz".len()];
-            let log_date = NaiveDateTime::parse_from_str(log_date, TIME_FMT)?.and_utc();
-            if (now - log_date).num_days() > 7 {
-                fs::remove_file(e.path())?
-            }
-        }
-        Ok(())
-    }
-
-    pub fn init(log_dir: impl AsRef<Path>, name: &str) -> Result<()> {
-        let log_dir = log_dir.as_ref();
-        fs::create_dir_all(&log_dir)?;
-        println!(
-            "logs will be saved to {}",
-            log_dir.join(name).to_string_lossy()
-        );
-        let source = log_dir.join(name);
-        let dest = log_dir
-            .join(&Utc::now().format(TIME_FMT).to_string())
-            .with_extension("tar.gz");
-        archive(source, dest, None)?;
-        let res = Self {
-            target: File::create(log_dir.join(name))?,
-            log_dir: log_dir.to_owned(),
-            file_name: name.into(),
-        };
-        writeln!(&res.target, "start: {}", Utc::now().format(TIME_FMT))?;
-        if let Err(err) = NaiveLogger::retention(log_dir) {
-            writeln!(&res.target, "log retention failed: {err:?}")?;
-        }
-        let res = Mutex::new(res);
-        LOGGER_INSTANCE.set(res).unwrap();
-        Ok(())
-    }
-
-    pub fn get_logs() -> Result<PathBuf> {
-        let logger = NaiveLogger::instance().lock().unwrap();
-        let tmp_file = logger.log_dir.join(f!("{}.tmp", logger.file_name));
-        std::fs::copy(logger.log_dir.join(&logger.file_name), &tmp_file)?;
-        let user_dirs = directories::UserDirs::new().unwrap();
-        let dest = user_dirs.desktop_dir().unwrap();
-        let dest_file = &dest.join(&f!(
-            "teleporter_{}.tar.gz",
-            &Utc::now().format(TIME_FMT).to_string()
-        ));
-        archive(&logger.log_dir, dest_file, Some(&logger.file_name))?;
-        std::fs::remove_file(tmp_file)?;
-        Ok(dest.to_owned())
-    }
-}
-
-#[macro_export]
-macro_rules! l {
-    ($($args:tt)*) => {{
-        write!(&NaiveLogger::instance().lock().unwrap().target, "[{}] {} - ", chrono::offset::Utc::now().format("%Y-%m-%d %H:%M:%S"), function!()).expect("error writing to log file");
-        writeln!(&NaiveLogger::instance().lock().unwrap().target, $($args)*).expect("error writing to log file");
-    }};
-}
-pub(crate) use l;
-
 #[macro_export]
 macro_rules! dump {
     ($msg:expr, $args:expr) => {{
-        write!(
-            &NaiveLogger::instance().lock().unwrap().target,
-            "[{}] {}: ",
-            chrono::offset::Utc::now().format("%Y-%m-%d %H:%M:%S"),
-            function!()
-        )
-        .expect("error writing to log file");
-        writeln!(
-            &NaiveLogger::instance().lock().unwrap().target,
-            "{}: {:?}",
-            $msg,
-            $args
-        )
-        .expect("error writing to log file");
+        log::info!("{} - {}: {:?}", $msg, function!(), $args);
         $args
     }};
     ($args:expr) => {
@@ -338,25 +234,25 @@ macro_rules! function {
 }
 pub(crate) use function;
 
-pub fn capture_panics() {
-    std::panic::set_hook(Box::new(move |info| {
-        let msg = match info.payload().downcast_ref::<&'static str>() {
-            Some(s) => *s,
-            None => match info.payload().downcast_ref::<String>() {
-                Some(s) => &**s,
-                None => "Box<Any>",
-            },
-        };
-        match info.location() {
-            Some(location) => {
-                l!("panic: '{}': {}:{}", msg, location.file(), location.line(),);
-            }
-            None => {
-                l!("panic: '{}'", msg);
-            }
-        }
-    }));
-}
+// pub fn capture_panics() {
+//     std::panic::set_hook(Box::new(move |info| {
+//         let msg = match info.payload().downcast_ref::<&'static str>() {
+//             Some(s) => *s,
+//             None => match info.payload().downcast_ref::<String>() {
+//                 Some(s) => &**s,
+//                 None => "Box<Any>",
+//             },
+//         };
+//         match info.location() {
+//             Some(location) => {
+//                 l!("panic: '{}': {}:{}", msg, location.file(), location.line(),);
+//             }
+//             None => {
+//                 l!("panic: '{}'", msg);
+//             }
+//         }
+//     }));
+// }
 
 pub fn has_unique_elements<T, F, K>(iter: T, key: F) -> bool
 where
@@ -374,4 +270,47 @@ macro_rules! to_owned {
         #[allow(unused_mut)]
         let mut $es = $es.to_owned();
     )*}
+}
+
+use anyhow::Context;
+
+pub trait ContextExt<T> {
+    fn loc(self) -> anyhow::Result<T>;
+    fn context<C>(self, context: C) -> anyhow::Result<T>
+    where
+        C: std::fmt::Display + Send + Sync + 'static;
+}
+
+impl<T, E: Into<anyhow::Error>> ContextExt<T> for Result<T, E> {
+    #[track_caller]
+    fn loc(self) -> anyhow::Result<T> {
+        let location = std::panic::Location::caller();
+        self.map_err(|e| {
+            let e: anyhow::Error = e.into();
+            e.context(format!(
+                "@ {}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            ))
+        })
+    }
+
+    #[track_caller]
+    fn context<C>(self, context: C) -> anyhow::Result<T>
+    where
+        C: std::fmt::Display + Send + Sync + 'static,
+    {
+        let location = std::panic::Location::caller();
+        self.map_err(|e| {
+            let e: anyhow::Error = e.into();
+            e.context(format!(
+                "{} @ {}:{}:{}",
+                context,
+                location.file(),
+                location.line(),
+                location.column()
+            ))
+        })
+    }
 }

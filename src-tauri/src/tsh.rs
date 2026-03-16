@@ -1,15 +1,10 @@
-use crate::{prelude::*, teleporter_config};
-use itertools::Itertools;
+use crate::prelude::*;
 use regex::Regex;
-use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const TSH_AUTH_ARGS: &[&str] = &["--proxy", "dc.mago.cloud", "--auth", "github"];
-const TSH_VERSION: &str = "tmp"; // env!("TSH_VERSION");
 const PROXY: &str = "ztvsproxy03.zg.local:8080";
-pub const TSH_BIN: &str = "teleport/teleporterdc_tsh.exe";
-pub const TSH_LOCAL_CONFIG: &str = "teleporter.yaml";
-const TSH_REMOTE_CONFIG: &str = "teleporter@bastion:storage/teleporter.config.yaml";
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -26,44 +21,122 @@ fn tsh(tsh_path: &str, cmd: &str) -> Command {
     res
 }
 
-pub fn get_cfg(tsh_path: &str) -> Result<String> {
-    let mut cmd = Command::new(tsh_path);
-    cmd.args(["proxy", "app", "paolo-test", "--port", "47473"]);
-    cmd.args(TSH_AUTH_ARGS);
-    _ = dump!(&cmd);
-    let mut ch = cmd.no_window().stdout(Stdio::piped()).spawn()?;
+const TUNNEL_PROTOCOL: &str = "teleporter-tunnel";
+const SERVER_ADDR: &str = "127.0.0.1:47476";
 
-    let stdout = ch.stdout.take().expect("no stdout");
+use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::spawn;
+use tokio::sync::watch;
 
-    let reader = BufReader::new(stdout);
+pub async fn bind_listener(local_bind: &str) -> anyhow::Result<TcpListener> {
+    TcpListener::bind(local_bind).await.loc()
+}
 
-    let mut result_value = None;
+pub async fn listen(
+    listener: TcpListener,
+    local_bind: &str,
+    remote_host: &str,
+    remote_port: u16,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    log::info!("listening on {}", local_bind);
 
-    for line in reader.lines() {
-        let line = line.expect("failed to read line");
-        println!("child said: {}", line);
+    loop {
+        if *shutdown.borrow() {
+            log::info!("stopping listener on {}", local_bind);
+            break;
+        }
 
-        // Proxying connections to paolo-test on 127.0.0.1:61973
-        use tauri::http::Response;
-        if line.starts_with("Proxying connections to paolo-test") {
-            let res = ureq::get("http://localhost:47473")
-                .call()?
-                .body_mut()
-                .read_to_string()
-                .context("call local uri")?;
+        let accepted = tokio::time::timeout(Duration::from_millis(250), listener.accept()).await;
+        match accepted {
+            Ok(accepted) => {
+                let (mut local, peer) = accepted?;
+                log::info!("accepted from {}", peer);
+                let remote_host = remote_host.to_string();
 
-            ch.kill()?;
-
-            l!("get_cfg output: {:?}", res);
-            result_value = Some(res);
+                spawn(async move {
+                    if let Err(e) = handle_conn(&mut local, remote_host, remote_port).await {
+                        log::error!("connection error: {e:?}");
+                    }
+                });
+            }
+            Err(_) => continue,
         }
     }
 
-    println!("{}", result_value.unwrap_or_default());
+    Ok(())
+}
 
-    ch.kill()?;
+async fn handle_conn(
+    local: &mut TcpStream,
+    remote_host: String,
+    remote_port: u16,
+) -> anyhow::Result<()> {
+    // connect to the server
+    let mut srv = TcpStream::connect(SERVER_ADDR).await.loc()?;
+    let host = SERVER_ADDR.split(':').next().unwrap_or(SERVER_ADDR);
 
-    Ok("".into())
+    // send HTTP/1.1 upgrade request
+    let req = format!(
+        "GET /tunnel?uri={}&port={} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: {}\r\n\r\n",
+        remote_host, remote_port, host, TUNNEL_PROTOCOL,
+    );
+    srv.write_all(req.as_bytes()).await.loc()?;
+
+    // read response headers until \r\n\r\n
+    let mut buf = [0u8; 1024];
+    let mut header_bytes = Vec::new();
+    loop {
+        let n = srv.read(&mut buf).await.loc()?;
+        if n == 0 {
+            anyhow::bail!("server closed connection during handshake");
+        }
+        header_bytes.extend_from_slice(&buf[..n]);
+        if header_bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if header_bytes.len() > 16 * 1024 {
+            anyhow::bail!("handshake headers too large");
+        }
+    }
+    let header_str = String::from_utf8_lossy(&header_bytes);
+    if !header_str.starts_with("HTTP/1.1 101") && !header_str.starts_with("HTTP/1.0 101") {
+        anyhow::bail!(
+            "upgrade failed: {}",
+            header_str.lines().next().unwrap_or("")
+        );
+    }
+
+    log::info!(
+        "upgrade successful, tunneling to {}:{}",
+        remote_host,
+        remote_port
+    );
+
+    // Now bridge bytes bidirectionally between local <-> srv
+    // Note: any leftover bytes after headers are already in header_bytes;
+    // if necessary, write leftover to `local` before starting the copy.
+    // For brevity we assume none.
+
+    let (mut l, mut s) = (local, srv);
+    let (a, b) = copy_bidirectional(&mut l, &mut s).await.loc()?;
+    log::info!("tunnel closed; sent={} received={}", a, b);
+
+    Ok(())
+}
+
+pub fn tsh_proxy_app(tsh_path: &str) -> Result<bool> {
+    let mut cmd = Command::new(tsh_path);
+    cmd.env("TELEPORTER", "1"); // to identify tsh processes started by us
+    cmd.args(["proxy", "app", "paolo-test", "--port", "47476"]);
+    cmd.args(TSH_AUTH_ARGS);
+    _ = dump!(&cmd);
+    let mut ch = cmd.no_window().spawn()?;
+
+    let res = ch.wait()?;
+
+    Ok(res.success())
 }
 
 pub fn execute_output(cmd: &mut Command) -> Result<String> {
@@ -76,8 +149,40 @@ pub fn execute_output(cmd: &mut Command) -> Result<String> {
     Ok(dump!(String::from_utf8_lossy(&out.stdout).into_owned()))
 }
 
+pub fn execute_output_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<String> {
+    _ = dump!(&cmd);
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .no_window()
+        .spawn()?;
+    let start = std::time::Instant::now();
+
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let out = child.wait_with_output()?;
+            if !status.success() {
+                bail!("{}", dump!(String::from_utf8_lossy(&out.stderr)));
+            }
+
+            return Ok(dump!(String::from_utf8_lossy(&out.stdout).into_owned()));
+        }
+
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("command timed out after {}s", timeout.as_secs());
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 pub fn login(tsh_path: &str) -> Result<LoginResult> {
-    let out = execute_output(tsh(tsh_path, "login").args(TSH_AUTH_ARGS))?;
+    let out = execute_output_with_timeout(
+        tsh(tsh_path, "login").args(TSH_AUTH_ARGS),
+        Duration::from_secs(60),
+    )?;
     let re = Regex::new(
         r"(?ms)Logged in as:\s*(.*?)$.*Roles:\s*(.*?)$.*Logins:\s*(.*?)$.*Extensions:\s*(.*?)$",
     )
@@ -97,203 +202,40 @@ pub fn login(tsh_path: &str) -> Result<LoginResult> {
 //     Ok(())
 // }
 
-// fn probe_google() {
-//     let Ok(res) = Command::new("curl")
-//         .args([
-//             "-k",
-//             "-s",
-//             "-o",
-//             "nul",
-//             "-f",
-//             "-LI",
-//             "https://www.google.com",
-//         ])
-//         .no_window()
-//         .status()
-//     else {
-//         l!("Error executing curl");
-//         return;
-//     };
-//     if res.success() {
-//         l!("Probing Google success");
-//     } else {
-//         l!("Probing Google failed with {:?}", res.code());
-//     }
-// }
-
-// fn monitor_tunnels(state: &Arc<RwLock<State>>, tunnels: &Vec<Tunnel>) {
-//     loop {
-//         for t in tunnels.iter().filter(|x| x.enabled) {
-//             if *state.read().unwrap() != State::Connected {
-//                 continue;
-//             };
-//             thread::sleep(Duration::from_secs(60));
-//             l!("Monitor {} {}", t.name, t.local);
-//             if let Ok(_) = TcpStream::connect(f!("127.0.0.1:{}", t.local)) {
-//                 l!("Monitor {}: success", t.name);
-//             } else {
-//                 l!("Monitor {}: fail", t.name);
-//             }
-//         }
-//     }
-// }
-
-// fn monitor_probes(state: &Arc<RwLock<State>>, probes: &Vec<Tunnel>, interval_sec: u64) {
-//     let interval_sec = if interval_sec == 0 { 20 } else { interval_sec };
-//     let mut sleep = interval_sec;
-//     let mut failures_count = 0;
-//     loop {
-//         for p in probes.iter().filter(|x| x.enabled) {
-//             if *state.read().unwrap() != State::Connected {
-//                 continue;
-//             };
-//             thread::sleep(Duration::from_secs(sleep));
-//             l!("Probing {}...", p.local);
-//             let proto = if p.secure { "https" } else { "http" };
-//             let local = &p.local;
-//             let Ok(res) = Command::new("curl")
-//                 .args(["-k", "-s", "-o", "nul", "-f", "-LI", &f!("{proto}://127.0.0.1:{local}")])
-//                 .no_window()
-//                 .status()
-//             else {
-//                 continue;
-//             };
-//             if res.success() {
-//                 failures_count = 0;
-//                 sleep = interval_sec;
-//                 l!("Probing success");
-//             } else {
-//                 failures_count += 1;
-//                 sleep = 1;
-//                 let code = res.code().unwrap_or_default();
-//                 l!("Probing {proto} {local} fail {code}, failure {failures_count}");
-//                 if failures_count >= 3 {
-//                     probe_google();
-//                     _ = kill_tsh().tap_err(|err| l!("Error restarting tsh {err:?}"));
-//                 }
-//             }
-//         }
-//     }
-// }
-
-// pub fn connect(opt: &Options, dispatch: &mut impl FnMut(Msg), state: &Arc<RwLock<State>>) {
-//     let cfg = &opt.remote_config;
-//     let enabled_tunnels = cfg.tunnels.clone().into_iter().filter(|x| x.enabled).collect_vec();
-//     let enabled_probes = cfg.probes.clone().into_iter().filter(|x| x.enabled).collect_vec();
-//     let tunnels = [enabled_tunnels, enabled_probes].concat();
-//     let tunnels = tunnels.iter().map(|x| vec!["-L".to_string(), x.as_ssh()]).flatten().collect_vec();
-//     let mut cmd = Command::new("cmd.exe");
-//     cmd.arg("/c")
-//         .arg(&f!(
-//             "{} ssh -d -N {} {} 2>&1",
-//             &opt.tsh_path.display(),
-//             tunnels.join(" "),
-//             &opt.config.bastion
-//         ))
-//         .no_window();
-//     thread::scope(|scope| {
-//         scope.spawn(|| monitor_probes(&state, &cfg.probes, cfg.probe_interval_sec));
-//         scope.spawn(|| monitor_tunnels(&state, &cfg.tunnels));
-//         let mut consecutive_fails = 0;
-//         loop {
-//             l!("while: {:?}", *state.read().unwrap());
-//             let mut output = cmd.stdout(Stdio::piped()).no_window().spawn().expect("Cannot execute tsh");
-//             let mut connected_sent = false;
-//             if let Some(stdout) = output.stdout.take() {
-//                 let mut stderr = BufReader::new(stdout);
-//                 let mut buffer = [0; 1024];
-//                 while let Ok(n_bytes) = stderr.read(&mut buffer[..]) {
-//                     if n_bytes == 0 {
-//                         break;
-//                     }
-//                     let res = String::from_utf8_lossy(&buffer);
-//                     let res = res.replace("\n", "nnn");
-//                     l!("[TSH] {res}");
-//                     if !connected_sent && res.contains("Starting port forwarding") {
-//                         consecutive_fails = 0;
-//                         dispatch(Msg::UpdateState(Connected));
-//                         connected_sent = true;
-//                     }
-//                 }
-//             }
-//             consecutive_fails += 1;
-//             l!("Tsh exit, fail {consecutive_fails}");
-//             if consecutive_fails > 2 {
-//                 consecutive_fails = 0;
-//                 l!("Trying to logout and login");
-//                 dispatch(Msg::UpdateState(Relogin));
-//                 _ = logout(opt).tap_err(|e| l!("Logout error: {e}"));
-//                 _ = login(opt).tap_err(|e| l!("Login error: {e}"));
-//             }
-//             dispatch(Msg::UpdateState(Connecting));
-//             std::thread::sleep(Duration::from_secs(1));
-//         }
-//     });
-// }
-
-fn filter_for_current_role(
-    login_res: &LoginResult,
-    mut config: teleporter_config::RemoteCfg,
-) -> teleporter_config::RemoteCfg {
-    let roles = &mut login_res.roles.split(",").map(|x| x.trim()).collect_vec();
-    roles.push(&login_res.user);
-    l!("{config:?}");
-    config.tunnels = config
-        .tunnels
-        .into_iter()
-        .filter(|x| {
-            let xroles = &mut x.roles.split(",").map(|r| r.trim()).collect_vec();
-            roles
-                .iter_mut()
-                .any(|r| xroles.iter_mut().any(|xr| r == xr))
-        })
-        .collect_vec();
-    l!("role filtered: {config:?}");
-    config
-}
-
-// pub fn save_to_local_config(opt: &Options) {
-//     let yaml = serde_yaml::to_string(&opt.config).tap_err(|e| l!("{e}")).unwrap();
-//     std::fs::write(&opt.config_path, yaml).tap_err(|e| l!("{e}")).unwrap();
-// }
-
-// pub fn get_config(opt: &Options, dispatch: &mut impl FnMut(Msg)) -> Result<()> {
-//     dispatch(Msg::Progress("Login".into(), 100.));
-//     let login_res = login(opt)?;
-//     dispatch(Msg::Progress("Get config".into(), 100.));
-//     execute(tsh(opt, "scp").args([TSH_REMOTE_CONFIG, "tmp.yaml"])).context("get config failed")?;
-//     let config = std::fs::read_to_string("tmp.yaml")?;
-//     let config: teleporter_config::RemoteCfg = serde_yaml::from_str(&config)?;
-//     let config = filter_for_current_role(&login_res, config);
-//     dispatch(Msg::Config(config));
-//     Ok(())
-// }
-
-// pub fn init(opt: &Options, dispatch: &mut impl FnMut(Msg)) -> Result<()> {
-//     check_tsh(opt, dispatch)?;
-//     dispatch(Msg::Progress("Logout".into(), 100.));
-//     logout(opt)?;
-//     get_config(opt, dispatch)
-// }
-
-#[cfg(target_os = "windows")]
 pub fn kill_tsh() -> Result<()> {
-    Command::new("taskkill")
-        .arg("/F")
-        .arg("/IM")
-        .arg("teleporterdc_tsh.exe")
-        .no_window()
-        .status()?;
-    Command::new("taskkill")
-        .arg("/F")
-        .arg("/IM")
-        .arg("teleporter_tsh.exe")
-        .no_window()
-        .status()?;
-    Ok(())
-}
+    use sysinfo::{Signal, System};
 
-#[cfg(not(target_os = "windows"))]
-pub fn kill_tsh() -> Result<()> {
+    let system = System::new_all();
+
+    for process in system.processes().values() {
+        // let name = process.name().to_string_lossy();
+        let exe_name = process
+            .exe()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        if !matches!(exe_name.as_ref(), "tsh.exe" | "tsh") {
+            continue;
+        }
+
+        // kills only processes with TELEPORTER=1 in env, to avoid killing unrelated tsh instances
+        if let Some(val) = process
+            .environ()
+            .iter()
+            .filter_map(|e| e.to_str()) // OsString -> &str
+            .find(|e| e.starts_with("TELEPORTER="))
+        {
+            log::info!(
+                "killing tsh process with pid {}, env {}",
+                process.pid(),
+                val
+            );
+            process
+                .kill_with(Signal::Term)
+                .unwrap_or_else(|| process.kill());
+        }
+    }
+
     Ok(())
 }

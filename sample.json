@@ -1,0 +1,28 @@
+{
+  "tunnels": [
+    {
+      "local": 5555,
+      "name": "mc",
+      "dest": "192.168.11.26",
+      "remote": 3389
+    },
+    {
+      "local": 5662,
+      "name": "test-mq",
+      "dest": "test-mq",
+      "remote": 5672
+    },
+    {
+      "local": 5665,
+      "name": "release-mq",
+      "dest": "release-mq",
+      "remote": 5672
+    },
+    {
+      "local": 5422,
+      "name": "test-pgsql",
+      "dest": "test-pgsql",
+      "remote": 5432
+    }
+  ]
+}

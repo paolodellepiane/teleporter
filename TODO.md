@@ -1,0 +1,8 @@
+- [x] add timeout to tsh login
+- [x] greet button on ui should become "connect"
+- [x] when connected, the button should show "disconnect"
+- [x] then connected and "disconnect" is pressed, close tsh executable and the listeners
+- [x] evaluate the possibility to use a rust crate to kill the process, and make it work both in macos and in windows
+- [x] prepare a stub that, when clicking connect, after tsh is started and before starting up the tcp listeners, call a remote api and gets a json like "sample.json".
+- [x] the interface should show a list showing something like "local port -> name" for each element in sample.json
+- [x] the backend should startup all the tunnels in sample.json
