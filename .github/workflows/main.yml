@@ -48,7 +48,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
-          releaseName: "teleporter v__VERSION__"
+          releaseName: "Teleporter v__VERSION__"
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: true
