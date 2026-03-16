@@ -36,5 +36,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIyOTlCOTY5M0E4MUZGRDkKUldUWi80RTZhYm1ac2hPS25OZko3ZFd1OHNFdS81bDc1L2oweUFSeC9IQzBZMFZ0a2V5SnRoUnYK",
+      "endpoints": [
+        "http://127.0.0.1:8080/server.json"
+      ],
+      "dangerousInsecureTransportProtocol": true
+    }
   }
 }
