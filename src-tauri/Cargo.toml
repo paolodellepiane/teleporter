@@ -1,5 +1,5 @@
 [package]
-name = "teleporter2"
+name = "teleporter"
 version = "0.1.0"
 description = "A Tauri App"
 authors = [ "you" ]
@@ -7,7 +7,7 @@ edition = "2021"
 
 
 [lib]
-name = "teleporter2_lib"
+name = "teleporter_lib"
 crate-type = [ "staticlib", "cdylib", "rlib" ]
 
 

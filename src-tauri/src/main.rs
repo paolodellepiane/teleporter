@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    teleporter2_lib::run()
+    teleporter_lib::run()
 }

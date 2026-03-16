@@ -4432,7 +4432,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "teleporter2"
+name = "teleporter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
