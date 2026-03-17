@@ -1,5 +1,5 @@
+use std::path::Path;
 use std::sync::Arc;
-use std::{os::unix::fs::PermissionsExt, path::Path};
 
 use serde::{Deserialize, Serialize};
 use tauri::{path::BaseDirectory, Emitter, Manager};
@@ -63,13 +63,16 @@ struct TunnelStatePayload {
 
 const TUNNEL_STATE_EVENT: &str = "tunnel-state";
 
+#[cfg(target_os = "macos")]
 fn set_exe_permissions(path: &std::path::Path) {
-    if cfg!(target_os = "macos") {
-        if let Err(err) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)) {
-            log::warn!("can't set permissions for {path:?}: {err:?}");
-        };
-    }
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(err) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)) {
+        log::warn!("can't set permissions for {path:?}: {err:?}");
+    };
 }
+
+#[cfg(target_os = "windows")]
+fn set_exe_permissions(path: &std::path::Path) {}
 
 fn prepare_tsh(handle: &tauri::AppHandle) -> Result<std::path::PathBuf> {
     let resource_path = handle
