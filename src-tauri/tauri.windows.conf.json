@@ -1,9 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "resources": [
-      "bin/version",
-      "bin/tsh.exe.7z"
-    ]
+    "resources": {
+      "bin/tsh.windows.7z": "bin/tsh.7z"
+    }
   }
 }
