@@ -17,6 +17,7 @@ pub struct LoginResult {
 
 fn tsh(tsh_path: &str, cmd: &str) -> Command {
     let mut res = Command::new(tsh_path);
+    res.env("TELEPORTER", "1"); // to identify tsh processes started by us
     res.arg(cmd);
     res
 }
